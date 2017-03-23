@@ -32,8 +32,80 @@ __global__ void blockadd(float* g_aux, float* g_odata, int n){
 // TODO: write a simple transpose kernel here
 
 // TODO: write 1D scan kernel here
+__global__ void scan(float *g_odata, float *g_idata, float *g_aux, int n){
+
+	int i = blockIdx.x*blockDim.x + threadIdx.x; //id of the thread within the block
+	__shared__ float temp[BLOCK_SIZE]; //create the temporary array
+	//copy the elements into the temp array
+
+	if (i < n){
+		temp[threadIdx.x] = g_idata[i];
+	}
+
+	for (unsigned int stride = 1; stride <= threadIdx.x; stride *= 2){
+		__syncthreads();
+		float in1 = 0.0;
+
+		if (threadIdx.x >= stride){
+			in1 = temp[threadIdx.x - stride];
+		}
+		__syncthreads();
+		temp[threadIdx.x] += in1;
+	}
+
+	__syncthreads();
+
+	if (i+1 < n) g_odata[i+1] = temp[threadIdx.x];
+
+
+	if (g_aux != NULL && threadIdx.x == blockDim.x - 1){
+
+		g_aux[blockIdx.x] = g_odata[i+1];
+		g_odata[i + 1] = 0;
+	}
+}
 
 // TODO: write recursive scan wrapper on CPU here
+
+void recursive_scan(float* deviceOutput, float* deviceInput, int numElements){
+	int numBlocks = (numElements / BLOCK_SIZE) + 1;
+	if (numBlocks == 1){ //If one block, do the scan
+		dim3 block(BLOCK_SIZE, 1);
+		dim3 grid(numBlocks, 1);
+
+		scan << <grid, block >> >(deviceOutput, deviceInput, NULL, numElements);
+		wbCheck(cudaDeviceSynchronize());
+	}
+	else{ //if more than one, cut the num elements and start again
+		float* deviceAux;
+		cudaMalloc((void**)&deviceAux, (numBlocks*sizeof(float)));
+
+		float *deviceAuxPass;
+		cudaMalloc((void**)&deviceAuxPass, (numBlocks*sizeof(float)));
+
+		dim3 block(BLOCK_SIZE, 1);
+		dim3 grid(numBlocks, 1);
+
+		scan << <grid, block >> >(deviceOutput, deviceInput, deviceAux, numElements);
+		wbCheck(cudaDeviceSynchronize());
+
+
+		dim3 grid2(1, 1);
+		dim3 block2(numBlocks, 1, 1);
+
+		scan << <grid2, block2 >> >(deviceAuxPass, deviceAux, NULL, numBlocks);
+		wbCheck(cudaDeviceSynchronize());
+
+		recursive_scan(deviceAuxPass, deviceAux, numBlocks);
+
+		blockadd << <block2, block >> >(deviceAuxPass, deviceOutput, numElements);
+		wbCheck(cudaDeviceSynchronize());
+
+		cudaFree(deviceAux);
+		cudaFree(deviceAuxPass);
+	}
+
+}
 
 int main(int argc, char **argv) {
 
@@ -75,6 +147,7 @@ int main(int argc, char **argv) {
 	//TODO: Modify this to complete the functionality of the scan on the deivce
 	for (int i = 0; i < numInputRows; ++i) {
 		// TODO: call your 1d scan kernel for each row here
+		recursive_scan(deviceOutput, deviceInput, numElements);
 
 		wbCheck(cudaDeviceSynchronize());
 	}
